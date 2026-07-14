@@ -1,0 +1,106 @@
+# ============================================================================
+#  X-Project  —  443 共用架构（Caddy layer4 SNI 分流）
+#
+#  TCP 443 → x-caddy(layer4) 按 SNI 分流：
+#     SNI = ${DOMAIN}      → x-xray:5443 (VLESS + XTLS-Vision + REALITY)
+#     其它 SNI            → 127.0.0.1:4443 (Caddy 本地: Trojan + ${SITE_DOMAIN} 文件站)
+#  UDP 443 → x-hysteria (Hysteria2，独占，复用 ${DOMAIN} 证书)
+#  证书由 Caddy 统一签发/续期；cert-sync 导出给 Hysteria2 复用。
+# ============================================================================
+
+services:
+  # 一次性渲染 xray / hysteria / caddy 配置
+  config-init:
+    image: alpine:3.20
+    container_name: x-config-init
+    env_file: .env
+    entrypoint: ["/bin/sh", "/render.sh"]
+    volumes:
+      - ./scripts/render-config.sh:/render.sh:ro
+      - ./config/xray/config.json.template:/tpl/xray.json:ro
+      - ./config/hysteria/config.yaml.template:/tpl/hysteria.yaml:ro
+      - ./config/caddy/caddy.json.template:/tpl/caddy.json:ro
+      - ./data/xray:/out/xray
+      - ./data/hysteria:/out/hysteria
+      - ./data/caddy:/out/caddy
+    restart: "no"
+
+  # Caddy(layer4+trojan)：TCP 443 SNI 分流 + 本地 web/trojan + 证书自动申请/续期
+  caddy:
+    image: caddy-l4-trojan:latest
+    container_name: x-caddy
+    restart: unless-stopped
+    command: ["caddy", "run", "--config", "/data/caddy/caddy.json"]
+    ports:
+      - "80:80"        # ACME HTTP-01 + HTTP 跳转
+      - "443:443"      # layer4 SNI 分流入口
+    volumes:
+      - ./data/caddy:/data/caddy       # 渲染后的 caddy.json + 证书存储（持久化）
+      - ./config/site:/srv:ro          # 伪装站（${SITE_DOMAIN}）文件根目录
+    networks:
+      - xnet
+    depends_on:
+      config-init:
+        condition: service_completed_successfully
+
+  # cert-sync：从 Caddy 证书目录导出 ${DOMAIN} 证书给 Hysteria2
+  cert-sync:
+    image: alpine:3.20
+    container_name: x-cert-sync
+    restart: unless-stopped
+    env_file: .env
+    entrypoint: ["/bin/sh", "/sync.sh"]
+    volumes:
+      - ./scripts/cert-sync.sh:/sync.sh:ro
+      - ./data/caddy:/caddy-data/caddy:ro
+      - ./data/certs:/certs
+    networks:
+      - xnet
+    depends_on:
+      - caddy
+    healthcheck:
+      test: ["CMD", "sh", "-c", "test -s /certs/fullchain.pem && test -s /certs/privkey.pem"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 10s
+
+  # Xray：VLESS + XTLS-Vision + REALITY，仅内网监听 5443（由 Caddy layer4 分流转入）
+  xray:
+    image: ghcr.io/xtls/xray-core:1.8.24
+    container_name: x-xray
+    restart: unless-stopped
+    command: ["run", "-c", "/etc/xray/config.json"]
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    volumes:
+      - ./data/xray:/etc/xray
+    networks:
+      - xnet
+    depends_on:
+      config-init:
+        condition: service_completed_successfully
+
+  # Hysteria2：独占 UDP 443，复用 ${DOMAIN} 证书
+  hysteria:
+    image: tobyxdd/hysteria:latest
+    container_name: x-hysteria
+    restart: unless-stopped
+    command: ["server", "-c", "/etc/hysteria/config.yaml"]
+    ports:
+      - "443:443/udp"
+    volumes:
+      - ./data/hysteria:/etc/hysteria
+      - ./data/certs:/certs:ro
+    networks:
+      - xnet
+    depends_on:
+      config-init:
+        condition: service_completed_successfully
+      cert-sync:
+        condition: service_healthy
+
+networks:
+  xnet:
+    driver: bridge

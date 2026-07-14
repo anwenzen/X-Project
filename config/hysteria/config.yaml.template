@@ -1,0 +1,38 @@
+# ============================================================================
+#  Hysteria2 服务端配置模板
+#  占位符 ${...} 在容器启动时由 entrypoint 用环境变量替换
+#  证书复用 Caddy 申请的真实证书（由 cert-sync 导出到 /certs）
+# ============================================================================
+
+# 监听 UDP 443（与 REALITY 的 TCP 443 端口号相同、协议不同，可共存）
+listen: :443
+
+# 使用 Caddy 申请的真实域名证书（非 ACME 模式，直接读取证书文件）
+# 这样证书由 Caddy 统一管理与续期，Hysteria2 只负责读取
+tls:
+  cert: /certs/fullchain.pem
+  key: /certs/privkey.pem
+
+# 认证：密码模式
+auth:
+  type: password
+  password: ${HYSTERIA_PASSWORD}
+
+# 流量混淆（Salamander）——把 QUIC 流量进一步混淆，抗封锁
+# 若 ${HYSTERIA_OBFS_PASSWORD} 为空，entrypoint 会移除整个 obfs 段
+obfs:
+  type: salamander
+  salamander:
+    password: ${HYSTERIA_OBFS_PASSWORD}
+
+# 带宽（用于 QUIC 拥塞控制，按服务器真实出口填写）
+bandwidth:
+  up: ${HYSTERIA_UP_MBPS} mbps
+  down: ${HYSTERIA_DOWN_MBPS} mbps
+
+# 被主动探测时，把非法请求伪装成一个正常 HTTPS 网站
+masquerade:
+  type: proxy
+  proxy:
+    url: ${MASQUERADE_UPSTREAM}
+    rewriteHost: true

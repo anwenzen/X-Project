@@ -1,0 +1,91 @@
+{
+  "admin": { "disabled": true },
+  "storage": { "module": "file_system", "root": "/data/caddy" },
+  "apps": {
+    "layer4": {
+      "servers": {
+        "tcp443": {
+          "listen": [":443"],
+          "routes": [
+            {
+              "match": [{ "tls": { "sni": ["${DOMAIN}"] } }],
+              "handle": [{
+                "handler": "proxy",
+                "upstreams": [{ "dial": ["x-xray:5443"] }]
+              }]
+            },
+            {
+              "match": [{ "tls": {} }],
+              "handle": [{
+                "handler": "proxy",
+                "upstreams": [{ "dial": ["127.0.0.1:4443"] }]
+              }]
+            }
+          ]
+        }
+      }
+    },
+    "http": {
+      "servers": {
+        "srv80": {
+          "listen": [":80"],
+          "routes": [{
+            "handle": [{
+              "handler": "static_response",
+              "headers": { "Location": ["https://{http.request.host}{http.request.uri}"] },
+              "status_code": 301
+            }]
+          }],
+          "protocols": ["h1"]
+        },
+        "srv0": {
+          "listen": ["0.0.0.0:4443"],
+          "listener_wrappers": [
+            { "wrapper": "trojan" }
+          ],
+          "routes": [
+            {
+              "match": [{ "host": ["${DOMAIN}"] }],
+              "handle": [{ "handler": "subroute", "routes": [{ "handle": [{ "body": "OK", "handler": "static_response" }] }] }],
+              "terminal": true
+            },
+            {
+              "match": [{ "host": ["${SITE_DOMAIN}"] }],
+              "handle": [{ "handler": "subroute", "routes": [
+                { "handle": [{ "connect_method": true, "handler": "trojan", "websocket": true }] },
+                { "handle": [{ "handler": "subroute", "routes": [
+                  { "handle": [{ "handler": "headers", "response": { "set": { "Content-Type": ["text/plain; charset=utf-8"] } } }], "match": [{ "path": ["*.yaml", "*.yml", "*.txt", "*.conf", "*.cfg", "*.ini", "*.md", "*.xml", "*.json", "*.toml"] }] },
+                  { "handle": [{ "handler": "file_server", "root": "/srv" }] }
+                ] }], "match": [{ "host": ["${SITE_DOMAIN}"] }] }
+              ] }],
+              "terminal": true
+            }
+          ],
+          "errors": {
+            "routes": [{
+              "match": [{ "host": ["${SITE_DOMAIN}"] }],
+              "handle": [{ "handler": "subroute", "routes": [{ "handle": [{ "handler": "subroute", "routes": [{ "handle": [{ "body": "{http.error.status_code} {http.error.status_text}", "handler": "static_response" }] }] }] }] }],
+              "terminal": true
+            }]
+          }
+        }
+      }
+    },
+    "trojan": {
+      "upstream": { "upstream": "caddy" },
+      "proxy": { "proxy": "none" },
+      "users": ["${TROJAN_PASSWORD}"]
+    },
+    "tls": {
+      "automation": {
+        "policies": [{
+          "subjects": ["${DOMAIN}", "${SITE_DOMAIN}"],
+          "issuers": [
+            { "email": "${ACME_EMAIL}", "module": "acme" },
+            { "ca": "https://acme.zerossl.com/v2/DV90", "email": "${ACME_EMAIL}", "module": "acme" }
+          ]
+        }]
+      }
+    }
+  }
+}
