@@ -12,7 +12,7 @@ echo "[render] 开始渲染配置..."
 sed \
   -e "s|\${VLESS_UUID}|${VLESS_UUID}|g" \
   -e "s|\${REALITY_DEST}|${REALITY_DEST}|g" \
-  -e "s|\${REALITY_SERVER_NAME}|${REALITY_SERVER_NAME}|g" \
+  -e "s|\${DOMAIN}|${DOMAIN}|g" \
   -e "s|\${REALITY_PRIVATE_KEY}|${REALITY_PRIVATE_KEY}|g" \
   -e "s|\${REALITY_SHORT_ID}|${REALITY_SHORT_ID}|g" \
   /tpl/xray.json > /out/xray/config.json
@@ -20,6 +20,7 @@ echo "[render] 已生成 /out/xray/config.json"
 
 # ---------- Hysteria2 ----------
 sed \
+  -e "s|\${DOMAIN}|${DOMAIN}|g" \
   -e "s|\${HYSTERIA_PASSWORD}|${HYSTERIA_PASSWORD}|g" \
   -e "s|\${HYSTERIA_OBFS_PASSWORD}|${HYSTERIA_OBFS_PASSWORD}|g" \
   -e "s|\${HYSTERIA_UP_MBPS}|${HYSTERIA_UP_MBPS}|g" \

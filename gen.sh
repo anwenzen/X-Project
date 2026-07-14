@@ -19,7 +19,7 @@ cd "$(dirname "$0")"
 
 ENV_FILE=".env"
 EXAMPLE_FILE=".env.example"
-XRAY_IMAGE="teddysun/xray:latest"
+XRAY_IMAGE="ghcr.io/xtls/xray-core:1.8.24"
 
 # ----- 准备 .env -----
 if [ ! -f "$ENV_FILE" ]; then
@@ -29,11 +29,11 @@ fi
 
 # ----- 生成 UUID -----
 echo "[gen] 生成 VLESS UUID..."
-VLESS_UUID=$(docker run --rm "$XRAY_IMAGE" xray uuid)
+VLESS_UUID=$(docker run --rm "$XRAY_IMAGE" uuid)
 
 # ----- 生成 REALITY x25519 密钥对 -----
 echo "[gen] 生成 REALITY x25519 密钥对..."
-X25519_OUT=$(docker run --rm "$XRAY_IMAGE" xray x25519)
+X25519_OUT=$(docker run --rm "$XRAY_IMAGE" x25519)
 # 兼容不同版本输出格式（Private key: / PrivateKey: 等）
 REALITY_PRIVATE_KEY=$(echo "$X25519_OUT" | grep -iE "private" | awk -F: '{print $2}' | tr -d ' ')
 REALITY_PUBLIC_KEY=$(echo "$X25519_OUT"  | grep -iE "public"  | awk -F: '{print $2}' | tr -d ' ')

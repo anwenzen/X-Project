@@ -3,37 +3,74 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Welcome</title>
+  <title>Notes &amp; Snippets</title>
+  <meta name="description" content="A small personal blog about backend engineering, networking and self-hosting.">
   <style>
-    :root { color-scheme: light dark; }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      background: #f7f7f8;
-      color: #24292f;
-    }
-    .card {
-      text-align: center;
-      padding: 48px 40px;
-      background: #fff;
-      border: 1px solid #e5e7eb;
-      border-radius: 12px;
-      box-shadow: 0 1px 3px rgba(0,0,0,.06);
-      max-width: 460px;
-    }
-    h1 { font-size: 22px; margin: 0 0 12px; }
-    p { font-size: 15px; line-height: 1.6; color: #57606a; margin: 0; }
-    .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:#2da44e; margin-right:6px; vertical-align:middle; }
+    :root { color-scheme: light dark; --fg:#1f2328; --muted:#656d76; --line:#d0d7de; --bg:#ffffff; --accent:#0969da; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; color:var(--fg); background:var(--bg); line-height:1.6; }
+    .wrap { max-width:720px; margin:0 auto; padding:0 20px; }
+    header { border-bottom:1px solid var(--line); }
+    nav { display:flex; align-items:center; justify-content:space-between; padding:18px 0; }
+    nav .brand { font-weight:700; font-size:18px; text-decoration:none; color:var(--fg); }
+    nav a.link { color:var(--muted); text-decoration:none; margin-left:18px; font-size:14px; }
+    nav a.link:hover { color:var(--accent); }
+    .hero { padding:40px 0 24px; }
+    .hero h1 { font-size:26px; margin:0 0 8px; }
+    .hero p { color:var(--muted); margin:0; }
+    .posts { padding:8px 0 40px; }
+    .post { padding:20px 0; border-bottom:1px solid var(--line); }
+    .post h2 { font-size:18px; margin:0 0 6px; }
+    .post h2 a { color:var(--fg); text-decoration:none; }
+    .post h2 a:hover { color:var(--accent); }
+    .post .meta { color:var(--muted); font-size:13px; margin:0 0 8px; }
+    .post p { margin:0; color:#3b434b; font-size:15px; }
+    footer { border-top:1px solid var(--line); padding:24px 0; color:var(--muted); font-size:13px; display:flex; justify-content:space-between; }
+    footer a { color:var(--muted); text-decoration:none; }
   </style>
 </head>
 <body>
-  <div class="card">
-    <h1>It works!</h1>
-    <p><span class="dot"></span>This site is running and reachable over HTTPS.</p>
-  </div>
+  <header>
+    <div class="wrap">
+      <nav>
+        <a class="brand" href="/">Notes &amp; Snippets</a>
+        <div>
+          <a class="link" href="/">Home</a>
+          <a class="link" href="/archive/">Archive</a>
+          <a class="link" href="/about/">About</a>
+        </div>
+      </nav>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="hero">
+      <h1>Notes &amp; Snippets</h1>
+      <p>Writing down what I learn about backend engineering, networking and self-hosting.</p>
+    </section>
+
+    <section class="posts">
+      <article class="post">
+        <h2><a href="/posts/tuning-tcp-buffers/">Tuning TCP buffers for high-throughput links</a></h2>
+        <p class="meta">June 28, 2026 · 6 min read</p>
+        <p>A short walkthrough of how socket buffer sizing and congestion control interact, and how I benchmarked a few settings on a small VPS.</p>
+      </article>
+      <article class="post">
+        <h2><a href="/posts/reverse-proxy-notes/">Notes on running a reverse proxy at home</a></h2>
+        <p class="meta">May 15, 2026 · 9 min read</p>
+        <p>Lessons learned from serving a handful of small services behind a single entrypoint, including TLS automation and graceful reloads.</p>
+      </article>
+      <article class="post">
+        <h2><a href="/posts/container-logging/">A minimal logging setup for containers</a></h2>
+        <p class="meta">April 2, 2026 · 5 min read</p>
+        <p>How I keep logs readable across a few containers without pulling in a heavy stack — just rotation, structure and a bit of discipline.</p>
+      </article>
+    </section>
+  </main>
+
+  <footer class="wrap">
+    <span>© 2026 Notes &amp; Snippets</span>
+    <span><a href="/feed.xml">RSS</a></span>
+  </footer>
 </body>
 </html>

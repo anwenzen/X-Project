@@ -27,7 +27,7 @@
           "dest": "${REALITY_DEST}",
           "xver": 0,
           "serverNames": [
-            "${REALITY_SERVER_NAME}"
+            "${DOMAIN}"
           ],
           "privateKey": "${REALITY_PRIVATE_KEY}",
           "shortIds": [

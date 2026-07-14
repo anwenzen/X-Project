@@ -46,7 +46,10 @@
           "routes": [
             {
               "match": [{ "host": ["${DOMAIN}"] }],
-              "handle": [{ "handler": "subroute", "routes": [{ "handle": [{ "body": "OK", "handler": "static_response" }] }] }],
+              "handle": [{ "handler": "subroute", "routes": [
+                { "handle": [{ "handler": "headers", "response": { "set": { "Content-Type": ["text/plain; charset=utf-8"] } } }], "match": [{ "path": ["*.yaml", "*.yml", "*.txt", "*.conf", "*.cfg", "*.ini", "*.md", "*.xml", "*.json", "*.toml"] }] },
+                { "handle": [{ "handler": "file_server", "root": "/srv" }] }
+              ] }],
               "terminal": true
             },
             {
@@ -63,7 +66,7 @@
           ],
           "errors": {
             "routes": [{
-              "match": [{ "host": ["${SITE_DOMAIN}"] }],
+              "match": [{ "host": ["${DOMAIN}", "${SITE_DOMAIN}"] }],
               "handle": [{ "handler": "subroute", "routes": [{ "handle": [{ "handler": "subroute", "routes": [{ "handle": [{ "body": "{http.error.status_code} {http.error.status_text}", "handler": "static_response" }] }] }] }] }],
               "terminal": true
             }]
@@ -81,8 +84,7 @@
         "policies": [{
           "subjects": ["${DOMAIN}", "${SITE_DOMAIN}"],
           "issuers": [
-            { "email": "${ACME_EMAIL}", "module": "acme" },
-            { "ca": "https://acme.zerossl.com/v2/DV90", "email": "${ACME_EMAIL}", "module": "acme" }
+            { "email": "${ACME_EMAIL}", "module": "acme" }
           ]
         }]
       }

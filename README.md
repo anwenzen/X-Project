@@ -23,17 +23,17 @@
                          │        └─ DOMAIN      → 回落网站(REALITY dest) │
                          └───────────────┬──────────────────────────────┘
                                          │ Caddy 统一 ACME 申请/续期证书
-                                         ▼
-   UDP 443 ────────────► ┌───────────┐  复制  ┌──────────────┐
-                         │ Hysteria2 │ ◄───── │ ./data/certs  │
-                         │  QUIC     │        │ fullchain.pem │
-                         └───────────┘        │ privkey.pem   │
-                              ▲ cert-sync 周期同步 └────────────┘
+                                         │ 存于 ./data/caddy/certificates/...
+                                         ▼ (只读挂载，自动热重载)
+   UDP 443 ────────────► ┌───────────┐
+                         │ Hysteria2 │  直接读取 Caddy 的 DOMAIN 证书文件
+                         │  QUIC     │
+                         └───────────┘
 ```
 
 - **Caddy（定制镜像 `caddy-l4-trojan`）**：监听 443 做 layer4 SNI 分流；同时承载 Trojan、伪装网站，并通过 ACME 为 `DOMAIN` / `SITE_DOMAIN` **自动申请与续期**证书（持久化在 `./data/caddy`）。
 - **Xray**：VLESS + XTLS-Vision + REALITY，仅内网监听 `5443`，由 Caddy 分流转入。REALITY 回落到本机 Caddy 网站，**借用自有域名**——被主动探测时会看到真实站点+真证书。
-- **cert-sync** sidecar：把 Caddy 申请到的 `DOMAIN` 证书导出为固定文件名 `./data/certs/fullchain.pem` / `privkey.pem`，供 Hysteria2 复用。
+- **Hysteria2**：只读挂载 Caddy 证书目录（`./data/caddy`），**直接读取** `DOMAIN` 的证书文件。Caddy 续期后原地更新证书，Hysteria2 会**自动热重载、无需重启**（不再需要 cert-sync sidecar）。
 - **config-init**：一次性容器，用 `.env` 把 Xray / Hysteria2 / Caddy 的模板渲染成实际配置写入 `./data`。
 - 所有敏感参数（域名、UUID、密钥、密码）都在 `.env` 中，**换机器只改 `.env` + DNS 解析**即可。
 
@@ -56,7 +56,8 @@
 ## 三、部署步骤
 
 ```bash
-# 1) 上传本项目到服务器后进入目录
+# 1) 克隆本仓库到服务器后进入目录
+git clone git@github.com:anwenzen/X-Project.git
 cd X-Project
 
 # 2) 构建定制 Caddy 镜像（含 layer4 + trojan 插件，首次约 2~4 分钟）
@@ -69,18 +70,19 @@ chmod +x gen.sh scripts/*.sh
 # 4) 编辑 .env，务必修改为你自己的域名与邮箱：
 #      DOMAIN=your.domain.com          # REALITY + Hysteria2
 #      SITE_DOMAIN=site.your.domain.com # Trojan + 网站（与 DOMAIN 不同）
-#      REALITY_SERVER_NAME=your.domain.com  # 必须 = DOMAIN
 #      ACME_EMAIL=admin@your.domain.com
 vim .env
 
 # 5) 启动全部服务
 docker compose up -d
 
-# 6) 查看日志，确认 Caddy 申请证书、cert-sync 导出、Hysteria2 启动
-docker compose logs -f caddy cert-sync hysteria
+# 6) 查看日志，确认 Caddy 申请证书、Hysteria2 启动
+docker compose logs -f caddy hysteria
 ```
 
-看到 `cert-sync` 输出 `证书已更新`、`hysteria` 输出 `server up and running` 即部署成功。
+看到 `caddy` 成功申请证书、`hysteria` 输出 `server up and running` 即部署成功。
+
+> 首次全新部署时，Hysteria2 可能因证书尚未申请完成而重启几轮，待 Caddy 拿到证书后会自动稳定。
 
 > ⚠️ 编译 Caddy 较吃内存，小内存机器（≤1G）建议先加 swap，避免其它容器被 OOM。
 
@@ -101,7 +103,7 @@ docker compose logs -f caddy cert-sync hysteria
 | 流控 flow | `xtls-rprx-vision` |
 | 传输 | TCP |
 | 安全 | reality |
-| SNI | **`DOMAIN`（= `.env` 中 `REALITY_SERVER_NAME`）** |
+| SNI | **`DOMAIN`（即 `.env` 中的 `DOMAIN`）** |
 | Fingerprint | `chrome` |
 | PublicKey | `.env` 中的 `REALITY_PUBLIC_KEY` |
 | ShortId | `.env` 中的 `REALITY_SHORT_ID` |
@@ -209,8 +211,7 @@ X-Project/
 │   ├── xray/config.json.template     # VLESS-REALITY 模板（内网 5443）
 │   └── hysteria/config.yaml.template # Hysteria2 模板
 ├── scripts/
-│   ├── render-config.sh              # 渲染 xray/hysteria/caddy 配置
-│   └── cert-sync.sh                  # 导出 Caddy 证书供 Hysteria2 复用
+│   └── render-config.sh              # 渲染 xray/hysteria/caddy 配置
 └── data/                             # 运行时持久化（证书/配置/日志，容器外）
 ```
 
@@ -219,7 +220,7 @@ X-Project/
 ## 八、工作原理要点
 
 - **为什么能共用 443**：Caddy 的 `layer4` 只读取 TLS ClientHello 里的 SNI（不解密），按域名把整条 TCP 连接**原样转发**给后端，REALITY 的特殊握手仍由 Xray 处理。
-- **REALITY 借用自有域名**：`REALITY_DEST` 指向本机 Caddy 网站，`REALITY_SERVER_NAME = DOMAIN`。主动探测你的域名会看到 Caddy 提供的真实网站与真证书，比借用第三方站点更隐蔽。
+- **REALITY 借用自有域名**：`REALITY_DEST` 指向本机 Caddy 网站，REALITY 的 SNI 即 `DOMAIN`。主动探测你的域名会看到 Caddy 提供的真实网站与真证书，比借用第三方站点更隐蔽。
   > 注意：REALITY 的 dest 若借用第三方站点，避免使用 Akamai CDN 类站点（如 `www.microsoft.com`），其对 REALITY 借用握手响应异常会导致连接被判为 invalid。
 - **Xray 版本**：镜像固定为 `ghcr.io/xtls/xray-core:1.8.24`，与主流客户端（含 Shadowrocket）的 REALITY 实现兼容性好。
 ```
