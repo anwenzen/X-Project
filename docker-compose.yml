@@ -1,10 +1,11 @@
 # ============================================================================
-#  X-Project  —  443 共用架构（Caddy layer4 SNI 分流 + sing-box 承载协议）
+#  X-Project  —  443 共用架构（Caddy layer4 SNI 分流 + sing-box/Caddy 承载协议）
 #
 #  TCP 443 → x-caddy(layer4) 按 SNI 分流：
 #     SNI = ${DOMAIN}      → x-singbox:5443 (VLESS + XTLS-Vision + REALITY)
-#     SNI = ${SITE_DOMAIN} → x-singbox:8443 (Trojan over TLS)
-#     其它 SNI            → 127.0.0.1:4443 (Caddy 本地 TLS 伪装站)
+#     其它 SNI            → 127.0.0.1:4443 (Caddy 本地：
+#                             Host=${SITE_DOMAIN} → Trojan(Caddy 自身承载) + 伪装站回落
+#                             Host=${DOMAIN}       → REALITY 回落的伪装站)
 #  UDP 443 → x-singbox (Hysteria2，独占，直接读取 Caddy 申请的 ${DOMAIN} 证书)
 #  证书由 Caddy 统一签发/续期，sing-box 只读挂载证书目录；证书文件更新后
 #  sing-box 的 certificate_path/key_path 会自动热重载，无需重启。
@@ -25,9 +26,9 @@ services:
       - ./data/caddy:/out/caddy
     restart: "no"
 
-  # Caddy(layer4)：TCP 443 SNI 分流 + 本地 web 伪装站 + 证书自动申请/续期
+  # Caddy(layer4+trojan)：TCP 443 SNI 分流 + 本地 web 伪装站 + Trojan + 证书自动申请/续期
   caddy:
-    image: caddy-l4:latest
+    image: caddy-l4-trojan:latest
     container_name: x-caddy
     restart: unless-stopped
     command: ["caddy", "run", "--config", "/data/caddy/caddy.json"]
@@ -43,8 +44,8 @@ services:
       config-init:
         condition: service_completed_successfully
 
-  # sing-box：一并承载 VLESS-REALITY(5443) + Trojan(8443) + Hysteria2(UDP 443)
-  #   5443/8443 仅内网监听，由 Caddy layer4 按 SNI 分流转入；
+  # sing-box：承载 VLESS-REALITY(5443) + Hysteria2(UDP 443)
+  #   5443 仅内网监听，由 Caddy layer4 按 SNI 分流转入；
   #   UDP 443 独占对外；只读挂载 Caddy 证书目录，证书更新后自动热重载。
   singbox:
     image: ghcr.io/sagernet/sing-box:v1.13.14

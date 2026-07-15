@@ -15,13 +15,6 @@
               }]
             },
             {
-              "match": [{ "tls": { "sni": ["${SITE_DOMAIN}"] } }],
-              "handle": [{
-                "handler": "proxy",
-                "upstreams": [{ "dial": ["x-singbox:8443"] }]
-              }]
-            },
-            {
               "match": [{ "tls": {} }],
               "handle": [{
                 "handler": "proxy",
@@ -47,10 +40,20 @@
         },
         "site_tls": {
           "listen": ["0.0.0.0:4443"],
+          "listener_wrappers": [{ "wrapper": "trojan" }],
           "routes": [
             {
-              "match": [{ "host": ["${DOMAIN}", "${SITE_DOMAIN}"] }],
+              "match": [{ "host": ["${DOMAIN}"] }],
               "handle": [{ "handler": "subroute", "routes": [
+                { "handle": [{ "handler": "headers", "response": { "set": { "Content-Type": ["text/plain; charset=utf-8"] } } }], "match": [{ "path": ["*.yaml", "*.yml", "*.txt", "*.conf", "*.cfg", "*.ini", "*.md", "*.xml", "*.json", "*.toml"] }] },
+                { "handle": [{ "handler": "file_server", "root": "/srv" }] }
+              ] }],
+              "terminal": true
+            },
+            {
+              "match": [{ "host": ["${SITE_DOMAIN}"] }],
+              "handle": [{ "handler": "subroute", "routes": [
+                { "handle": [{ "handler": "trojan", "connect_method": true, "websocket": true }] },
                 { "handle": [{ "handler": "headers", "response": { "set": { "Content-Type": ["text/plain; charset=utf-8"] } } }], "match": [{ "path": ["*.yaml", "*.yml", "*.txt", "*.conf", "*.cfg", "*.ini", "*.md", "*.xml", "*.json", "*.toml"] }] },
                 { "handle": [{ "handler": "file_server", "root": "/srv" }] }
               ] }],
@@ -62,19 +65,13 @@
               "handle": [{ "body": "{http.error.status_code} {http.error.status_text}", "handler": "static_response" }]
             }]
           }
-        },
-        "site_plain": {
-          "listen": ["0.0.0.0:8080"],
-          "automatic_https": { "disable": true },
-          "protocols": ["h1"],
-          "routes": [{
-            "handle": [{ "handler": "subroute", "routes": [
-              { "handle": [{ "handler": "headers", "response": { "set": { "Content-Type": ["text/plain; charset=utf-8"] } } }], "match": [{ "path": ["*.yaml", "*.yml", "*.txt", "*.conf", "*.cfg", "*.ini", "*.md", "*.xml", "*.json", "*.toml"] }] },
-              { "handle": [{ "handler": "file_server", "root": "/srv" }] }
-            ] }]
-          }]
         }
       }
+    },
+    "trojan": {
+      "upstream": { "upstream": "caddy" },
+      "proxy": { "proxy": "none" },
+      "users": ["${TROJAN_PASSWORD}"]
     },
     "tls": {
       "automation": {

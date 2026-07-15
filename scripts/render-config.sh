@@ -12,14 +12,12 @@ echo "[render] 开始渲染配置..."
 echo "[render] 安装 jq ..."
 apk add --no-cache jq >/dev/null 2>&1 || true
 
-# ---------- sing-box (VLESS-REALITY + Trojan + Hysteria2) ----------
+# ---------- sing-box (VLESS-REALITY + Hysteria2) ----------
 sed \
   -e "s|\${VLESS_UUID}|${VLESS_UUID}|g" \
   -e "s|\${DOMAIN}|${DOMAIN}|g" \
-  -e "s|\${SITE_DOMAIN}|${SITE_DOMAIN}|g" \
   -e "s|\${REALITY_PRIVATE_KEY}|${REALITY_PRIVATE_KEY}|g" \
   -e "s|\${REALITY_SHORT_ID}|${REALITY_SHORT_ID}|g" \
-  -e "s|\${TROJAN_PASSWORD}|${TROJAN_PASSWORD}|g" \
   -e "s|\${HYSTERIA_PASSWORD}|${HYSTERIA_PASSWORD}|g" \
   -e "s|\${HYSTERIA_OBFS_PASSWORD}|${HYSTERIA_OBFS_PASSWORD}|g" \
   -e "s|\${HYSTERIA_UP_MBPS}|${HYSTERIA_UP_MBPS}|g" \
@@ -38,11 +36,12 @@ fi
 rm -f /out/singbox/config.json.tmp
 echo "[render] 已生成 /out/singbox/config.json"
 
-# ---------- Caddy (layer4 SNI 分流 + 伪装站 + 证书) ----------
+# ---------- Caddy (layer4 SNI 分流 + Trojan + 伪装站 + 证书) ----------
 sed \
   -e "s|\${DOMAIN}|${DOMAIN}|g" \
   -e "s|\${SITE_DOMAIN}|${SITE_DOMAIN}|g" \
   -e "s|\${ACME_EMAIL}|${ACME_EMAIL}|g" \
+  -e "s|\${TROJAN_PASSWORD}|${TROJAN_PASSWORD}|g" \
   /tpl/caddy.json > /out/caddy/caddy.json
 echo "[render] 已生成 /out/caddy/caddy.json"
 

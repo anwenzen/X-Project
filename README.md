@@ -1,6 +1,6 @@
 # X-Project: VLESS-REALITY + Trojan + Hysteria2 · Shared-443 One-Click Deploy
 
-Deploy three proxy protocols with Docker Compose. Using **Caddy layer4 (L4) SNI routing**, **VLESS-REALITY, Trojan, and the decoy website share a single TCP 443**, while **Hysteria2 owns UDP 443**. All three proxy protocols are carried by a **single sing-box** instance. Every protocol runs on the standard 443 port; an active probe only ever sees a real website with a real certificate — **strong stealth, better censorship resistance**.
+Deploy three proxy protocols with Docker Compose. Using **Caddy layer4 (L4) SNI routing**, **VLESS-REALITY, Trojan, and the decoy website share a single TCP 443**, while **Hysteria2 owns UDP 443**. VLESS-REALITY and Hysteria2 are carried by **sing-box**; **Trojan is carried by Caddy itself** (via the `caddy-trojan` plugin), so a failed/non-Trojan probe falls straight through to the decoy website served by the same Caddy process. Every protocol runs on the standard 443 port; an active probe only ever sees a real website with a real certificate — **strong stealth, better censorship resistance**.
 
 ---
 
@@ -23,10 +23,13 @@ Deploy three proxy protocols with Docker Compose. Using **Caddy layer4 (L4) SNI 
    TCP 443 ─────────────► │  x-caddy (layer4 SNI routing, reads ClientHello   │
                           │           SNI only, no decryption)                │
                           │                                                   │
-                          │   SNI = DOMAIN      → x-singbox:5443 (VLESS-REALITY)│
-                          │   SNI = SITE_DOMAIN → x-singbox:8443 (Trojan/TLS)  │
-                          │   other SNI         → 127.0.0.1:4443 (Caddy local  │
-                          │                        TLS decoy site)             │
+                          │   SNI = DOMAIN → x-singbox:5443 (VLESS-REALITY)    │
+                          │   other SNI    → 127.0.0.1:4443 (Caddy local,      │
+                          │                   trojan listener_wrapper on top)  │
+                          │     Host = SITE_DOMAIN → Trojan (Caddy itself)     │
+                          │                           + decoy site fallback   │
+                          │     Host = DOMAIN       → decoy site (REALITY     │
+                          │                           handshake fallback)     │
                           └───────────────┬─────────────────────────────────┘
                                           │ Caddy handles ACME(LE) issuance/renewal
                                           │ stored under ./data/caddy/certificates/...
@@ -34,7 +37,6 @@ Deploy three proxy protocols with Docker Compose. Using **Caddy layer4 (L4) SNI 
    UDP 443 ─────────────► ┌───────────┐
                           │ x-singbox │  Hysteria2 (QUIC), reads Caddy's DOMAIN cert directly
                           │           │  + REALITY handshake falls back to x-caddy:4443
-                          │           │  + Trojan non-proxy traffic falls back to x-caddy:8080
                           └───────────┘
    TCP 80  ─────────────► x-caddy (ACME HTTP-01 validation + HTTP→HTTPS redirect)
 ```
@@ -44,14 +46,14 @@ Three containers (managed by `docker compose`):
 | Container | Image | Listens | Role |
 |-----------|-------|---------|------|
 | `x-config-init` | `alpine:3.20` | — | **One-shot** container: renders the sing-box/caddy configs from `.env` into `./data`, then exits |
-| `x-caddy` | `caddy-l4:latest` (self-built) | 80, 443/tcp (public); 4443, 8080 (internal) | layer4 SNI routing + decoy website (TLS 4443 / plain 8080) + automatic ACME issuance/renewal |
-| `x-singbox` | `ghcr.io/sagernet/sing-box:v1.13.14` | 443/udp (public); 5443, 8443 (internal) | VLESS-REALITY (5443) + Trojan/TLS (8443) + Hysteria2 (UDP 443) |
+| `x-caddy` | `caddy-l4-trojan:latest` (self-built) | 80, 443/tcp (public); 4443 (internal) | layer4 SNI routing + Trojan + decoy website (TLS 4443) + automatic ACME issuance/renewal |
+| `x-singbox` | `ghcr.io/sagernet/sing-box:v1.13.14` | 443/udp (public); 5443 (internal) | VLESS-REALITY (5443) + Hysteria2 (UDP 443) |
 
 **Key design points:**
 - **Shared 443**: Caddy's `layer4` reads only the SNI from the TLS ClientHello (no decryption) and forwards the entire TCP connection **as-is** to the backend based on the domain; REALITY's special handshake is still handled by sing-box.
-- **One sing-box, three protocols**: sing-box carries VLESS-REALITY, Trojan and Hysteria2 in a single process, replacing the previous separate Xray + Hysteria containers.
+- **VLESS-REALITY + Hysteria2 via sing-box**: sing-box carries both protocols in a single process.
 - **REALITY borrows your own domain**: sing-box's REALITY `handshake` points to the local Caddy website (`x-caddy:4443`) and the SNI is `DOMAIN`. Under active probing, the observer sees the **real website + real certificate** served by Caddy.
-- **Trojan camouflage**: sing-box's Trojan inbound terminates TLS for `SITE_DOMAIN`; any non-Trojan (e.g. a browser probe) traffic **falls back** to Caddy's plain decoy site (`x-caddy:8080`), so probing `SITE_DOMAIN` returns a real website.
+- **Trojan is carried by Caddy itself** (`caddy-trojan` plugin): a `trojan` `listener_wrapper` on Caddy's local TLS port (4443) inspects the raw TCP stream first — if it's a valid Trojan handshake it's handled as a proxy connection; otherwise Caddy **rewinds the bytes and continues normal HTTP routing**, so an HTTP probe against `SITE_DOMAIN` falls straight through to the decoy `file_server`, no separate fallback hop needed.
 - **Zero-relay certificates**: after Caddy issues certs, sing-box reads them directly via a read-only mount of the cert directory; on renewal Caddy updates the files in place and sing-box's `certificate_path`/`key_path` **hot-reload automatically, no restart needed**.
 
 ---
@@ -61,14 +63,14 @@ Three containers (managed by `docker compose`):
 ```
 X-Project/
 ├── docker-compose.yml                # Service orchestration (3 services, shared-443 architecture)
-├── caddy.Dockerfile                  # Builds the custom caddy-l4 image (caddy 2.11.4 + layer4)
+├── caddy.Dockerfile                  # Builds the custom caddy-l4-trojan image (caddy 2.11.4 + layer4 + trojan)
 ├── .env.example                      # Environment variable template
 ├── .env                              # Actual env vars (generated by gen.sh, contains secrets, gitignored)
 ├── gen.sh                            # One-click generator for UUID / REALITY keys / Trojan & Hysteria passwords
 ├── config/
-│   ├── caddy/caddy.json.template     # Caddy layer4 routing + decoy site + certs (JSON template)
+│   ├── caddy/caddy.json.template     # Caddy layer4 routing + Trojan + decoy site + certs (JSON template)
 │   ├── site/index.html               # Decoy site homepage (shown when DOMAIN / SITE_DOMAIN is visited)
-│   └── singbox/config.json.template  # sing-box template: VLESS-REALITY + Trojan + Hysteria2
+│   └── singbox/config.json.template  # sing-box template: VLESS-REALITY + Hysteria2
 ├── scripts/
 │   └── render-config.sh              # Renders the sing-box/caddy configs (runs inside an alpine container)
 └── data/                             # Runtime persistence (certs/rendered configs, outside containers, gitignored)
@@ -98,13 +100,14 @@ X-Project/
 
 ## 4. Deployment Steps
 
+
 ```bash
 # 1) Clone this repo onto the server and enter the directory
 git clone git@github.com:anwenzen/X-Project.git
 cd X-Project
 
-# 2) Build the custom Caddy image (with the layer4 plugin; ~2-4 min on first build)
-docker build -t caddy-l4:latest -f caddy.Dockerfile .
+# 2) Build the custom Caddy image (with the layer4 + trojan plugins; ~2-4 min on first build)
+docker build -t caddy-l4-trojan:latest -f caddy.Dockerfile .
 
 # 3) One-click generate UUID / REALITY keys / Trojan password / Hysteria password (auto-written to .env)
 chmod +x gen.sh scripts/*.sh
@@ -125,7 +128,7 @@ docker compose logs -f caddy singbox
 
 When the `caddy` log shows a successful cert issuance and `singbox` starts serving without cert errors, deployment succeeded.
 
-> On a **brand-new first deploy**, Caddy needs a few tens of seconds to obtain a certificate; during that window sing-box may restart a few times because it can't read the Trojan/Hysteria2 certs yet. It stabilizes automatically once the certs are ready — this is normal.
+> On a **brand-new first deploy**, Caddy needs a few tens of seconds to obtain a certificate; during that window sing-box may restart a few times because it can't read the Hysteria2 cert yet. It stabilizes automatically once the certs are ready — this is normal.
 
 Verify the services:
 ```bash
@@ -149,7 +152,7 @@ curl -sI https://<SITE_DOMAIN> | head -1
 | `REALITY_PRIVATE_KEY` | REALITY private key (server side) | gen.sh |
 | `REALITY_PUBLIC_KEY` | REALITY public key (**for the client**) | gen.sh |
 | `REALITY_SHORT_ID` | REALITY shortId (16 hex chars) | gen.sh |
-| `TROJAN_PASSWORD` | Trojan connection password | gen.sh |
+| `TROJAN_PASSWORD` | Trojan connection password (Caddy `caddy-trojan` plugin) | gen.sh |
 | `HYSTERIA_PASSWORD` | Hysteria2 auth password | gen.sh |
 | `HYSTERIA_OBFS_PASSWORD` | Hysteria2 Salamander obfuscation password (leave empty to disable obfs) | gen.sh |
 | `HYSTERIA_UP_MBPS` / `HYSTERIA_DOWN_MBPS` | Server bandwidth ceiling (QUIC congestion-control reference) | Preset 1000 |
@@ -218,7 +221,7 @@ proxies:
 
 | Component | Image | Version |
 |-----------|-------|---------|
-| Caddy (self-built) | `caddy-l4:latest` | Based on `caddy:2.11.4` + `caddy-l4` |
+| Caddy (self-built) | `caddy-l4-trojan:latest` | Based on `caddy:2.11.4` + `caddy-l4` + `caddy-trojan` |
 | sing-box | `ghcr.io/sagernet/sing-box` | `v1.13.14` |
 | Render/tools | `alpine` | `3.20` |
 
