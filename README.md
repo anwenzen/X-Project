@@ -1,225 +1,227 @@
-# X-Project：VLESS-REALITY + Trojan + Hysteria2 · 443 共用一键部署
+# X-Project: VLESS-REALITY + Trojan + Hysteria2 · Shared-443 One-Click Deploy
 
-用 Docker Compose 部署三个代理协议，通过 **Caddy layer4（四层）SNI 分流**，让 **VLESS-REALITY、Trojan、伪装网站共用同一个 TCP 443**，**Hysteria2 独占 UDP 443**。所有协议都跑在标准 443 端口，主动探测时看到的是真实网站与真证书，**隐蔽性强、更抗封锁**。
+Deploy three proxy protocols with Docker Compose. Using **Caddy layer4 (L4) SNI routing**, **VLESS-REALITY, Trojan, and the decoy website share a single TCP 443**, while **Hysteria2 owns UDP 443**. Every protocol runs on the standard 443 port; an active probe only ever sees a real website with a real certificate — **strong stealth, better censorship resistance**.
 
-| 协议 | 内核 | 入口 | 域名(SNI) | 证书 | 适用场景 |
-|------|------|------|-----------|------|----------|
-| **VLESS + XTLS-Vision + REALITY** | Xray 1.8.24 | **TCP 443**（Caddy 分流） | `DOMAIN` | 借用自有域名真证书伪装 | 日常主力、抗封锁 |
-| **Trojan** | Caddy(caddy-trojan) | **TCP 443**（Caddy 分流） | `SITE_DOMAIN` | Caddy 自动申请 | 备用通道 |
-| **Hysteria2** | hysteria v2.10.0 | **UDP 443** | `DOMAIN` | 复用 Caddy 证书（热重载） | 晚高峰、弱网、流媒体 |
+| Protocol | Core | Entry | Domain (SNI) | Certificate | Use case |
+|----------|------|-------|--------------|-------------|----------|
+| **VLESS + XTLS-Vision + REALITY** | Xray 26.6.27 | **TCP 443** (Caddy routing) | `DOMAIN` | Borrows your own domain's real cert for camouflage | Daily driver, censorship resistance |
+| **Trojan** | Caddy (caddy-trojan) | **TCP 443** (Caddy routing) | `SITE_DOMAIN` | Auto-issued by Caddy | Backup channel |
+| **Hysteria2** | hysteria v2.10.0 | **UDP 443** | `DOMAIN` | Reuses Caddy's cert (hot reload) | Peak hours, weak networks, streaming |
 
-> TCP 443 与 UDP 443 端口号相同但协议不同，互不冲突。TCP 443 上再由 Caddy 按 SNI 分流给 REALITY / Trojan / 网站。
-
----
-
-## 目录
-
-- [一、架构原理](#一架构原理)
-- [二、目录结构](#二目录结构)
-- [三、前置条件](#三前置条件)
-- [四、部署步骤](#四部署步骤)
-- [五、.env 配置项详解](#五env-配置项详解)
-- [六、客户端连接参数](#六客户端连接参数)
-- [七、工作原理详解](#七工作原理详解)
-- [八、常用运维命令](#八常用运维命令)
-- [九、故障排查（踩坑记录）](#九故障排查踩坑记录)
-- [十、换机器部署](#十换机器部署)
+> TCP 443 and UDP 443 share the same port number but different protocols, so they don't conflict. On TCP 443, Caddy further routes by SNI to REALITY / Trojan / website.
 
 ---
 
-## 一、架构原理
+## Table of Contents
+
+- [1. Architecture](#1-architecture)
+- [2. Directory Layout](#2-directory-layout)
+- [3. Prerequisites](#3-prerequisites)
+- [4. Deployment Steps](#4-deployment-steps)
+- [5. .env Reference](#5-env-reference)
+- [6. Client Connection Parameters](#6-client-connection-parameters)
+- [7. How It Works](#7-how-it-works)
+- [8. Common Ops Commands](#8-common-ops-commands)
+- [9. Troubleshooting (Lessons Learned)](#9-troubleshooting-lessons-learned)
+- [10. Migrating to a New Machine](#10-migrating-to-a-new-machine)
+
+---
+
+## 1. Architecture
 
 ```
                           ┌─────────────────────────────────────────────────┐
-   TCP 443 ─────────────► │  x-caddy (layer4 SNI 分流，只读 ClientHello 不解密) │
+   TCP 443 ─────────────► │  x-caddy (layer4 SNI routing, reads ClientHello   │
+                          │           SNI only, no decryption)                │
                           │                                                   │
                           │   SNI = DOMAIN      → x-xray:5443  (VLESS-REALITY) │
-                          │   其它 SNI          → 127.0.0.1:4443 (Caddy 本地)   │
-                          │        ├─ Host=SITE_DOMAIN → Trojan + 文件站(/srv) │
-                          │        └─ Host=DOMAIN      → 文件站(REALITY 回落)  │
+                          │   other SNI         → 127.0.0.1:4443 (Caddy local) │
+                          │        ├─ Host=SITE_DOMAIN → Trojan + file site    │
+                          │        └─ Host=DOMAIN      → file site (REALITY    │
+                          │                              fallback)             │
                           └───────────────┬─────────────────────────────────┘
-                                          │ Caddy 统一 ACME(LE) 申请/续期证书
-                                          │ 存于 ./data/caddy/certificates/...
-                                          ▼ (只读挂载 /caddy-certs，自动热重载)
+                                          │ Caddy handles ACME(LE) issuance/renewal
+                                          │ stored under ./data/caddy/certificates/...
+                                          ▼ (read-only mount /caddy-certs, auto hot reload)
    UDP 443 ─────────────► ┌───────────┐
-                          │ x-hysteria│  直接读取 Caddy 的 DOMAIN 证书文件
+                          │ x-hysteria│  reads Caddy's DOMAIN cert files directly
                           │  QUIC     │
                           └───────────┘
-   TCP 80  ─────────────► x-caddy (ACME HTTP-01 验证 + HTTP→HTTPS 跳转)
+   TCP 80  ─────────────► x-caddy (ACME HTTP-01 validation + HTTP→HTTPS redirect)
 ```
 
-四个容器（`docker compose` 管理）：
+Four containers (managed by `docker compose`):
 
-| 容器 | 镜像 | 监听 | 职责 |
-|------|------|------|------|
-| `x-config-init` | `alpine:3.20` | — | **一次性**容器：用 `.env` 渲染 xray/hysteria/caddy 三份配置到 `./data`，完成即退出 |
-| `x-caddy` | `caddy-l4-trojan:latest`（自建） | 80, 443/tcp（对外）; 4443（内部） | layer4 SNI 分流 + Trojan + 伪装网站 + ACME 证书自动申请续期 |
-| `x-xray` | `ghcr.io/xtls/xray-core:1.8.24` | 5443（仅内网） | VLESS + XTLS-Vision + REALITY，由 Caddy 分流转入 |
-| `x-hysteria` | `tobyxdd/hysteria:v2.10.0` | 443/udp（对外） | Hysteria2，只读挂载 Caddy 证书目录直接读取 |
+| Container | Image | Listens | Role |
+|-----------|-------|---------|------|
+| `x-config-init` | `alpine:3.20` | — | **One-shot** container: renders the xray/hysteria/caddy configs from `.env` into `./data`, then exits |
+| `x-caddy` | `caddy-l4-trojan:latest` (self-built) | 80, 443/tcp (public); 4443 (internal) | layer4 SNI routing + Trojan + decoy website + automatic ACME issuance/renewal |
+| `x-xray` | `ghcr.io/xtls/xray-core:26.6.27` | 5443 (internal only) | VLESS + XTLS-Vision + REALITY, fed by Caddy routing |
+| `x-hysteria` | `tobyxdd/hysteria:v2.10.0` | 443/udp (public) | Hysteria2, reads Caddy's cert directory via read-only mount |
 
-**关键设计**：
-- **共用 443**：Caddy 的 `layer4` 只读取 TLS ClientHello 里的 SNI（不解密），按域名把整条 TCP 连接**原样转发**给后端，REALITY 的特殊握手仍由 Xray 处理。
-- **REALITY 借用自有域名**：`REALITY_DEST` 指向本机 Caddy 网站（`x-caddy:4443`），SNI 即 `DOMAIN`。被主动探测时会看到 Caddy 提供的**真实网站 + 真证书**，比借用第三方站点更隐蔽。
-- **证书零中转**：Caddy 申请证书后，Hysteria2 直接只读挂载证书目录读取；续期后 Caddy 原地更新文件，Hysteria2 **自动热重载、无需重启**（不用 cert-sync sidecar）。
+**Key design points:**
+- **Shared 443**: Caddy's `layer4` reads only the SNI from the TLS ClientHello (no decryption) and forwards the entire TCP connection **as-is** to the backend based on the domain; REALITY's special handshake is still handled by Xray.
+- **REALITY borrows your own domain**: `REALITY_DEST` points to the local Caddy website (`x-caddy:4443`) and the SNI is `DOMAIN`. Under active probing, the observer sees the **real website + real certificate** served by Caddy — stealthier than borrowing a third-party site.
+- **Zero-relay certificates**: after Caddy issues certs, Hysteria2 reads them directly via a read-only mount of the cert directory; on renewal Caddy updates the files in place and Hysteria2 **hot-reloads automatically, no restart needed** (no cert-sync sidecar).
 
 ---
 
-## 二、目录结构
+## 2. Directory Layout
 
 ```
 X-Project/
-├── docker-compose.yml                # 服务编排（4 个服务，443 共用架构）
-├── caddy.Dockerfile                  # 构建 caddy-l4-trojan 定制镜像（caddy 2.11.4 + layer4 + trojan）
-├── .env.example                      # 环境变量模板
-├── .env                              # 实际环境变量（gen.sh 生成，含密钥，已被 .gitignore 忽略）
-├── gen.sh                            # 一键生成 UUID / REALITY 密钥 / Trojan & Hysteria 密码
+├── docker-compose.yml                # Service orchestration (4 services, shared-443 architecture)
+├── caddy.Dockerfile                  # Builds the custom caddy-l4-trojan image (caddy 2.11.4 + layer4 + trojan)
+├── .env.example                      # Environment variable template
+├── .env                              # Actual env vars (generated by gen.sh, contains secrets, gitignored)
+├── gen.sh                            # One-click generator for UUID / REALITY keys / Trojan & Hysteria passwords
 ├── config/
-│   ├── caddy/caddy.json.template     # Caddy layer4 分流 + trojan + 网站 + 证书（JSON 模板）
-│   ├── site/index.html               # 伪装站首页（DOMAIN / SITE_DOMAIN 被访问时展示）
-│   ├── xray/config.json.template     # VLESS-REALITY 模板（内网 5443）
-│   └── hysteria/config.yaml.template # Hysteria2 模板（直接读 Caddy 证书）
+│   ├── caddy/caddy.json.template     # Caddy layer4 routing + trojan + website + certs (JSON template)
+│   ├── site/index.html               # Decoy site homepage (shown when DOMAIN / SITE_DOMAIN is visited)
+│   ├── xray/config.json.template     # VLESS-REALITY template (internal 5443)
+│   └── hysteria/config.yaml.template # Hysteria2 template (reads Caddy certs directly)
 ├── scripts/
-│   └── render-config.sh              # 渲染 xray/hysteria/caddy 配置（在 alpine 容器内运行）
-└── data/                             # 运行时持久化（证书/渲染配置/日志，容器外，.gitignore）
-    ├── caddy/                        #   Caddy 渲染配置 + 证书存储
-    ├── xray/                         #   渲染后的 xray 配置 + access/error 日志
-    └── hysteria/                     #   渲染后的 hysteria 配置
+│   └── render-config.sh              # Renders the xray/hysteria/caddy configs (runs inside an alpine container)
+└── data/                             # Runtime persistence (certs/rendered configs/logs, outside containers, gitignored)
+    ├── caddy/                        #   Caddy rendered config + cert storage
+    ├── xray/                         #   Rendered xray config (logs go to stdout, no longer written to disk)
+    └── hysteria/                     #   Rendered hysteria config
 ```
 
 ---
 
-## 三、前置条件
+## 3. Prerequisites
 
-1. 一台有公网 IP 的 Linux 服务器，已装 **Docker** 与 **Docker Compose 插件**。
-   - 内存建议 ≥ 1G；**编译 Caddy 较吃内存，小内存机器建议先加 2G swap**（见故障排查）。
-2. **两个域名**（必须不同），A 记录都解析到服务器公网 IP：
+1. A Linux server with a public IP, with **Docker** and the **Docker Compose plugin** installed.
+   - RAM ≥ 1G recommended; **compiling Caddy is memory-hungry, so on low-memory machines add 2G of swap first** (see Troubleshooting).
+2. **Two domains** (must be different), both with A records pointing to the server's public IP:
 
-   | 变量 | 用途 | 示例 |
-   |------|------|------|
-   | `DOMAIN` | REALITY 的 SNI + Hysteria2 证书 | `a.example.com` |
-   | `SITE_DOMAIN` | Trojan + 伪装网站 | `b.example.com` |
+   | Variable | Purpose | Example |
+   |----------|---------|---------|
+   | `DOMAIN` | REALITY's SNI + Hysteria2 cert | `a.example.com` |
+   | `SITE_DOMAIN` | Trojan + decoy website | `b.example.com` |
 
-   > 为什么要两个域名：layer4 靠**不同的 SNI** 来区分「这条连接该给 REALITY 还是给 Trojan/网站」。两个域名指向同一台机器即可。
-3. 放行防火墙 / 云安全组端口：**TCP 80、TCP 443、UDP 443**。
-   - TCP 80：ACME 证书验证（HTTP-01）+ HTTP 跳 HTTPS
-   - TCP 443：VLESS-REALITY / Trojan / 网站（Caddy 分流）
-   - UDP 443：Hysteria2（**云安全组常默认不放行 UDP，务必检查**）
+   > Why two domains: layer4 uses **different SNIs** to decide "does this connection go to REALITY or to Trojan/website". Both domains just need to point to the same machine.
+3. Open the firewall / cloud security group ports: **TCP 80, TCP 443, UDP 443**.
+   - TCP 80: ACME cert validation (HTTP-01) + HTTP→HTTPS redirect
+   - TCP 443: VLESS-REALITY / Trojan / website (Caddy routing)
+   - UDP 443: Hysteria2 (**cloud security groups often block UDP by default — be sure to check**)
 
 ---
 
-## 四、部署步骤
+## 4. Deployment Steps
 
 ```bash
-# 1) 克隆本仓库到服务器后进入目录
+# 1) Clone this repo onto the server and enter the directory
 git clone git@github.com:anwenzen/X-Project.git
 cd X-Project
 
-# 2) 构建定制 Caddy 镜像（含 layer4 + trojan 插件，首次约 2~4 分钟）
+# 2) Build the custom Caddy image (with layer4 + trojan plugins; ~2-4 min on first build)
 docker build -t caddy-l4-trojan:latest -f caddy.Dockerfile .
 
-# 3) 一键生成 UUID / REALITY 密钥 / Trojan 密码 / Hysteria 密码（自动写入 .env）
+# 3) One-click generate UUID / REALITY keys / Trojan password / Hysteria password (auto-written to .env)
 chmod +x gen.sh scripts/*.sh
 ./gen.sh
 
-# 4) 编辑 .env，把下面三项改成你自己的（其余已由 gen.sh 填好）：
+# 4) Edit .env and set the following three to your own values (the rest is filled by gen.sh):
 #      DOMAIN=a.example.com
-#      SITE_DOMAIN=b.example.com     # 必须与 DOMAIN 不同
+#      SITE_DOMAIN=b.example.com     # must differ from DOMAIN
 #      ACME_EMAIL=you@example.com
 vim .env
 
-# 5) 启动全部服务
+# 5) Start all services
 docker compose up -d
 
-# 6) 观察证书申请与启动
+# 6) Watch cert issuance and startup
 docker compose logs -f caddy hysteria
 ```
 
-看到 `caddy` 日志出现证书申请成功、`hysteria` 输出 `server up and running` 即部署成功。
+When the `caddy` log shows a successful cert issuance and `hysteria` prints `server up and running`, deployment succeeded.
 
-> **首次全新部署**时，Caddy 申请证书需要几十秒；这期间 Hysteria2 可能因读不到证书而重启几轮，待证书就绪后会自动稳定，属正常现象。
+> On a **brand-new first deploy**, Caddy needs a few tens of seconds to obtain a certificate; during that window Hysteria2 may restart a few times because it can't read the cert yet. It stabilizes automatically once the cert is ready — this is normal.
 
-验证服务：
+Verify the services:
 ```bash
-docker compose ps                                   # 四个容器应为 Up（config-init 为 Exited 0，正常）
-# REALITY 伪装层：对 443 做 TLS 握手应返回 DOMAIN 的真证书
+docker compose ps                                   # Four containers should be Up (config-init being Exited 0 is normal)
+# REALITY camouflage layer: a TLS handshake to 443 should return DOMAIN's real cert
 echo | openssl s_client -connect 127.0.0.1:443 -servername <DOMAIN> 2>/dev/null | openssl x509 -noout -subject
-# 网站：应返回 200
+# Website: should return 200
 curl -sI https://<SITE_DOMAIN> | head -1
 ```
 
 ---
 
-## 五、.env 配置项详解
+## 5. .env Reference
 
-| 变量 | 说明 | 来源 |
-|------|------|------|
-| `DOMAIN` | 主域名。REALITY 的 SNI + Hysteria2 的证书域名 | **手动填** |
-| `SITE_DOMAIN` | 站点域名。Trojan + 伪装网站（须与 `DOMAIN` 不同） | **手动填** |
-| `ACME_EMAIL` | ACME 证书申请邮箱（Let's Encrypt 到期提醒） | **手动填** |
-| `VLESS_UUID` | VLESS 客户端 UUID | gen.sh |
-| `REALITY_DEST` | REALITY 回落目标，固定 `x-caddy:4443`（本机 Caddy 网站） | 预设 |
-| `REALITY_PRIVATE_KEY` | REALITY x25519 私钥（服务端用） | gen.sh |
-| `REALITY_PUBLIC_KEY` | REALITY x25519 公钥（**给客户端**） | gen.sh |
-| `REALITY_SHORT_ID` | REALITY shortId（16 位十六进制） | gen.sh |
-| `TROJAN_PASSWORD` | Trojan 连接密码 | gen.sh |
-| `HYSTERIA_PASSWORD` | Hysteria2 认证密码 | gen.sh |
-| `HYSTERIA_OBFS_PASSWORD` | Hysteria2 Salamander 混淆密码（留空则禁用混淆） | gen.sh |
-| `HYSTERIA_UP_MBPS` / `HYSTERIA_DOWN_MBPS` | 服务端带宽上限（QUIC 拥塞控制参考值） | 预设 1000 |
-| `MASQUERADE_UPSTREAM` | Hysteria2 被主动探测时反代的伪装网站 | 预设 |
+| Variable | Description | Source |
+|----------|-------------|--------|
+| `DOMAIN` | Primary domain. REALITY's SNI + Hysteria2's cert domain | **Set manually** |
+| `SITE_DOMAIN` | Site domain. Trojan + decoy website (must differ from `DOMAIN`) | **Set manually** |
+| `ACME_EMAIL` | Email for ACME cert issuance (Let's Encrypt expiry reminders) | **Set manually** |
+| `VLESS_UUID` | VLESS client UUID | gen.sh |
+| `REALITY_DEST` | REALITY fallback target, fixed at `x-caddy:4443` (local Caddy website) | Preset |
+| `REALITY_PRIVATE_KEY` | REALITY x25519 private key (server side) | gen.sh |
+| `REALITY_PUBLIC_KEY` | REALITY x25519 public key (**for the client**) | gen.sh |
+| `REALITY_SHORT_ID` | REALITY shortId (16 hex chars) | gen.sh |
+| `TROJAN_PASSWORD` | Trojan connection password | gen.sh |
+| `HYSTERIA_PASSWORD` | Hysteria2 auth password | gen.sh |
+| `HYSTERIA_OBFS_PASSWORD` | Hysteria2 Salamander obfuscation password (leave empty to disable obfs) | gen.sh |
+| `HYSTERIA_UP_MBPS` / `HYSTERIA_DOWN_MBPS` | Server bandwidth ceiling (QUIC congestion-control reference) | Preset 1000 |
+| `MASQUERADE_UPSTREAM` | Website Hysteria2 reverse-proxies to when actively probed | Preset |
 
-> REALITY 的 SNI **不再单独配置**，直接复用 `DOMAIN`（渲染时自动写入 xray 配置）。
+> REALITY's SNI is **no longer configured separately** — it reuses `DOMAIN` (written into the xray config at render time).
 
 ---
 
-## 六、客户端连接参数
+## 6. Client Connection Parameters
 
-部署后 `cat .env` 获取密钥。下面 `<...>` 用你的实际值替换。
+After deploying, run `cat .env` to get the secrets. Replace `<...>` below with your actual values.
 
-### 1. VLESS-REALITY（TCP 443）
+### 1. VLESS-REALITY (TCP 443)
 
-| 项 | 值 |
-|----|----|
-| 地址 | 服务器 IP 或 `DOMAIN` |
-| 端口 | `443` |
-| 协议 | VLESS |
+| Field | Value |
+|-------|-------|
+| Address | Server IP or `DOMAIN` |
+| Port | `443` |
+| Protocol | VLESS |
 | UUID | `<VLESS_UUID>` |
-| 流控 flow | `xtls-rprx-vision` |
-| 传输 | TCP |
-| 安全 | reality |
+| Flow | `xtls-rprx-vision` |
+| Transport | TCP |
+| Security | reality |
 | SNI / peer | **`<DOMAIN>`** |
 | Fingerprint | `chrome` |
 | PublicKey (pbk) | `<REALITY_PUBLIC_KEY>` |
 | ShortId (sid) | `<REALITY_SHORT_ID>` |
 
-### 2. Trojan（TCP 443）
+### 2. Trojan (TCP 443)
 
-| 项 | 值 |
-|----|----|
-| 地址 | **`<SITE_DOMAIN>`**（走 TLS，需用域名） |
-| 端口 | `443` |
-| 协议 | Trojan |
-| 密码 | `<TROJAN_PASSWORD>` |
+| Field | Value |
+|-------|-------|
+| Address | **`<SITE_DOMAIN>`** (uses TLS, must be a domain) |
+| Port | `443` |
+| Protocol | Trojan |
+| Password | `<TROJAN_PASSWORD>` |
 | SNI | `<SITE_DOMAIN>` |
 
-### 3. Hysteria2（UDP 443）
+### 3. Hysteria2 (UDP 443)
 
-| 项 | 值 |
-|----|----|
-| 地址 | **`<DOMAIN>`**（证书校验，须用域名，不能用 IP） |
-| 端口 | `443`（UDP） |
-| 密码 | `<HYSTERIA_PASSWORD>` |
-| 混淆 obfs | `salamander` |
-| 混淆密码 | `<HYSTERIA_OBFS_PASSWORD>` |
+| Field | Value |
+|-------|-------|
+| Address | **`<DOMAIN>`** (cert validation requires a domain, not an IP) |
+| Port | `443` (UDP) |
+| Password | `<HYSTERIA_PASSWORD>` |
+| obfs | `salamander` |
+| obfs password | `<HYSTERIA_OBFS_PASSWORD>` |
 | SNI | `<DOMAIN>` |
-| 上传/下载带宽 | **留空**（走 BBR 自适应，切勿设过大值） |
+| Up/Down bandwidth | **Leave empty** (let BBR self-adapt; never set too high) |
 
-### Clash Verge Rev 示例
+### Clash Verge Rev Example
 
 ```yaml
 proxies:
   - name: "VLESS-REALITY"
     type: vless
-    server: a.example.com          # DOMAIN 或服务器 IP
+    server: a.example.com          # DOMAIN or server IP
     port: 443
     uuid: <VLESS_UUID>
     network: tcp
@@ -242,108 +244,109 @@ proxies:
 
   - name: "Hysteria2"
     type: hysteria2
-    server: a.example.com          # = DOMAIN，必须用域名
+    server: a.example.com          # = DOMAIN, must be a domain
     port: 443
     password: <HYSTERIA_PASSWORD>
     sni: a.example.com
     obfs: salamander
     obfs-password: <HYSTERIA_OBFS_PASSWORD>
-    # up/down 留空走 BBR 自适应；或设小值如 up: "20 Mbps" down: "100 Mbps"
+    # Leave up/down empty for BBR self-adaptation; or set small values like up: "20 Mbps" down: "100 Mbps"
 ```
 
 ---
 
-## 七、工作原理详解
+## 7. How It Works
 
-### 7.1 TCP 443 的 SNI 分流
+### 7.1 SNI routing on TCP 443
 
-Caddy 用 `caddy-l4` 插件在 443 做四层代理，只读 ClientHello 的 SNI，不解密：
+Caddy uses the `caddy-l4` plugin to do L4 proxying on 443, reading only the ClientHello SNI without decryption:
 
-| ClientHello SNI | 转发到 | 后续处理 |
-|-----------------|--------|----------|
-| `DOMAIN` | `x-xray:5443` | Xray 处理 VLESS-REALITY 握手 |
-| 其它（含 `SITE_DOMAIN`） | `127.0.0.1:4443` | Caddy 本地 HTTP 服务（带 trojan wrapper）|
+| ClientHello SNI | Forwarded to | Subsequent handling |
+|-----------------|--------------|---------------------|
+| `DOMAIN` | `x-xray:5443` | Xray handles the VLESS-REALITY handshake |
+| Others (incl. `SITE_DOMAIN`) | `127.0.0.1:4443` | Caddy's local HTTP service (with trojan wrapper) |
 
-到了本地 4443 后，Caddy 再按 HTTP Host 分：
-- `Host = SITE_DOMAIN`：先过 Trojan（`caddy-trojan`，解 Trojan-over-TLS），非 Trojan 流量落到文件站 `/srv`
-- `Host = DOMAIN`：文件站 `/srv`（这正是 **REALITY 回落**时探测者看到的真实网站）
+Once at local 4443, Caddy splits further by HTTP Host:
+- `Host = SITE_DOMAIN`: first pass through Trojan (`caddy-trojan`, decodes Trojan-over-TLS); non-Trojan traffic falls to the file site `/srv`
+- `Host = DOMAIN`: file site `/srv` (this is exactly the real website a prober sees during **REALITY fallback**)
 
-### 7.2 REALITY 的「借用」与回落
+### 7.2 REALITY "borrowing" and fallback
 
-- REALITY 客户端用正确的 `pbk`/`sid`/UUID 握手 → Xray 认证通过，走代理。
-- 未认证的**主动探测**（如浏览器直接访问 `https://DOMAIN`）→ Xray 把连接回落给 `REALITY_DEST=x-caddy:4443`，Caddy 用 `DOMAIN` 的真证书 + 真网站响应。探测者看到的是一个正常运营的网站，无法分辨这是代理入口。
+- A REALITY client handshakes with the correct `pbk`/`sid`/UUID → Xray authenticates and proxies.
+- An unauthenticated **active probe** (e.g. a browser hitting `https://DOMAIN` directly) → Xray falls the connection back to `REALITY_DEST=x-caddy:4443`, and Caddy responds with `DOMAIN`'s real cert + real website. The prober sees a normally operating website and cannot tell this is a proxy entry point.
 
-### 7.3 证书生命周期
+### 7.3 Certificate lifecycle
 
-1. Caddy 通过 ACME（Let's Encrypt）为 `DOMAIN` 和 `SITE_DOMAIN` 申请证书，存 `./data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/<域名>/`。
-2. Hysteria2 只读挂载 `./data/caddy` → 容器 `/caddy-certs`，配置直接指向 `DOMAIN` 的 `.crt`/`.key`。
-3. Caddy 自动续期 → 原地更新证书文件 → Hysteria2 **自动热重载**，无需人工干预。
+1. Caddy issues certs for `DOMAIN` and `SITE_DOMAIN` via ACME (Let's Encrypt), stored under `./data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/<domain>/`.
+2. Hysteria2 read-only mounts `./data/caddy` → container `/caddy-certs`, and its config points directly to `DOMAIN`'s `.crt`/`.key`.
+3. Caddy auto-renews → updates the cert files in place → Hysteria2 **hot-reloads automatically**, no manual intervention.
 
-> ⚠️ 证书路径写死了 ACME CA 目录名 `acme-v02.api.letsencrypt.org-directory`（Let's Encrypt）。`caddy.json.template` 已锁定只用 LE，路径稳定。若你改用其它 CA，需同步改 `config/hysteria/config.yaml.template` 里的路径。
+> ⚠️ The cert path hard-codes the ACME CA directory name `acme-v02.api.letsencrypt.org-directory` (Let's Encrypt). `caddy.json.template` is locked to LE only, so the path is stable. If you switch to another CA, also update the path in `config/hysteria/config.yaml.template`.
 
 ---
 
-## 八、常用运维命令
+## 8. Common Ops Commands
 
 ```bash
 cd X-Project
 
-docker compose ps                       # 服务状态
-docker compose logs -f caddy            # Caddy 分流 / 证书日志
-docker compose logs -f xray             # Xray 日志（access/error 也在 data/xray/）
-docker logs x-hysteria --tail 30        # Hysteria2 日志
-docker compose restart hysteria         # 重启单个服务
-docker compose down                     # 停止（证书/配置保留在 ./data）
-docker compose up -d                    # 启动
+docker compose ps                       # Service status
+docker compose logs -f caddy            # Caddy routing / cert logs
+docker compose logs -f xray             # Xray logs (from 26.6.27, goes to stdout; no longer writes data/xray/*.log)
+docker logs x-hysteria --tail 30        # Hysteria2 logs
+docker compose restart hysteria         # Restart a single service
+docker compose down                     # Stop (certs/configs kept in ./data)
+docker compose up -d                    # Start
 
-# 改了 .env 后：config-init 用 env_file，必须重建才会重新渲染/注入（restart 无效）
+# After editing .env: config-init uses env_file, so you must recreate to re-render/re-inject (restart won't do it)
 docker compose up -d --force-recreate --no-deps config-init
 docker compose up -d --force-recreate --no-deps xray hysteria caddy
 
-# 开 Xray debug 抓连接（排障后记得改回 warning 并重启 x-xray）
+# Enable Xray debug to capture connections (remember to switch back to warning and restart x-xray afterward)
 sed -i 's/"loglevel": "warning"/"loglevel": "debug"/' data/xray/config.json && docker restart x-xray
 ```
 
 ---
 
-## 九、故障排查（踩坑记录）
+## 9. Troubleshooting (Lessons Learned)
 
-按项目实际踩过的坑整理，遇到问题先看这里：
+Organized from pitfalls actually hit on this project — check here first when something breaks:
 
-1. **Xray 版本固定 `1.8.24`**：26.x 等过新版本与部分客户端（如 Shadowrocket）内置的 REALITY 实现握手不稳。**不要随意升级或换 `latest`**。
-2. **REALITY 的 dest 不要用 Akamai CDN 站点**（如 `www.microsoft.com`）：会导致服务端把所有客户端判为 `invalid connection`。本项目用自有域名回落，已规避。
-3. **Hysteria2 客户端带宽必须留空 / 设小值**：设过大会触发 Brutal 拥塞控制「硬发」，在移动网络上瞬间打爆链路造成大量丢包，表现为「**连得上、传不动**」（日志 `accepting stream failed: timeout`）。留空走 BBR 最稳。
-4. **VLESS 连不上、服务端日志 `server name mismatch`**：客户端 SNI 填错（不是 `DOMAIN`），或手机上残留旧节点。确认客户端 SNI/peer = `DOMAIN`，并删掉旧节点。
-5. **VLESS 连不上、服务端日志 `authentication failed`**：`pbk`/`sid` 与服务端不匹配，或客户端与服务端时间偏差过大（REALITY 有时间戳校验）。核对密钥、开启手机「自动设置时间」。
-6. **改了 `.env` 不生效**：`config-init` 用 `env_file`，`docker restart` 不会重新注入/渲染，必须 `docker compose up -d --force-recreate` 重建相关容器。
-7. **UDP 443 手机连不上**：优先检查**云安全组**是否放行了 UDP 443（本地 `ufw`/`iptables` 放行不代表云控制台放行）。
-8. **编译 Caddy 时其它容器被 OOM Kill**（小内存机器）：加 swap：
+1. **Xray version**: currently pinned to `26.6.27`. Testing showed `26.7.11` handshakes unreliably with some clients' built-in REALITY implementations (e.g. Shadowrocket); `24.x / 25.x / 26.6.27` and earlier are all fine. **Always validate on a test port before upgrading, and don't just switch to `latest`** (a bisection confirmed `26.6.27` is the latest stably usable version).
+2. **Don't use an Akamai CDN site as the REALITY dest** (e.g. `www.microsoft.com`): it causes the server to flag all clients as `invalid connection`. This project uses its own domain for fallback, avoiding the issue.
+3. **Hysteria2 client bandwidth must be empty / set small**: setting it too high triggers the Brutal congestion control's "hard send", which instantly saturates the link and causes heavy packet loss on mobile networks — the symptom is "**connects but can't transfer**" (log `accepting stream failed: timeout`). Leaving it empty (BBR) is the most stable.
+4. **VLESS won't connect, server log `server name mismatch`**: the client SNI is wrong (not `DOMAIN`), or a stale node lingers on the phone. Confirm client SNI/peer = `DOMAIN` and delete old nodes.
+5. **VLESS won't connect, server log `authentication failed`**: `pbk`/`sid` don't match the server, or the client-server clock skew is too large (REALITY has timestamp validation). Double-check the keys and enable "set time automatically" on the phone.
+6. **`.env` changes not taking effect**: `config-init` uses `env_file`; `docker restart` won't re-inject/re-render — you must `docker compose up -d --force-recreate` to recreate the relevant containers.
+7. **Phone can't connect over UDP 443**: first check whether the **cloud security group** allows UDP 443 (a local `ufw`/`iptables` allow doesn't mean the cloud console allows it).
+8. **Other containers OOM-killed while compiling Caddy** (low-memory machines): add swap:
    ```bash
    fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
    echo '/swapfile none swap sw 0 0' >> /etc/fstab
    ```
-9. **首次部署 Hysteria2 反复重启**：证书还没申请好，属正常，等 Caddy 拿到证书后自动稳定。
+9. **Hysteria2 restarts repeatedly on first deploy**: the cert isn't issued yet — this is normal; it stabilizes once Caddy obtains the cert.
+10. **Newer Xray images (from 24.x) run as the non-root user `65532`**: if the config specifies `access`/`error` log file paths (e.g. `/etc/xray/access.log`), the container restarts repeatedly because it can't write to `/etc/xray/` (log `open /etc/xray/access.log: permission denied`). This project's template has been changed to **not write log files — logs go to stdout** (view with `docker logs x-xray`), so `data/xray` can stay root-owned and needs no special chown. **Do not** add `access`/`error` file paths back into the config.
 
 ---
 
-## 十、换机器部署
+## 10. Migrating to a New Machine
 
-1. 新机器 `git clone git@github.com:anwenzen/X-Project.git`（仓库不含 `.env`）。
-2. 按「[四、部署步骤](#四部署步骤)」构建镜像、`./gen.sh`、填 `.env`（或从旧机器拷贝 `.env` 以保持 UUID/密钥不变）。
-3. 把 `DOMAIN` 和 `SITE_DOMAIN` 的 DNS 解析改到新机器 IP。
-4. `docker compose up -d`，Caddy 会自动申请证书。
+1. On the new machine, `git clone git@github.com:anwenzen/X-Project.git` (the repo does not include `.env`).
+2. Follow "[4. Deployment Steps](#4-deployment-steps)" to build the image, run `./gen.sh`, and fill in `.env` (or copy `.env` from the old machine to keep the same UUID/keys).
+3. Point the DNS of `DOMAIN` and `SITE_DOMAIN` to the new machine's IP.
+4. `docker compose up -d`; Caddy will obtain certificates automatically.
 
-> 想连证书一起迁移（免重新申请）：把旧机器的 `./data/caddy` 一并复制过去即可。
+> To migrate the certs too (avoiding re-issuance): just copy the old machine's `./data/caddy` over as well.
 
 ---
 
-## 附：镜像版本
+## Appendix: Image Versions
 
-| 组件 | 镜像 | 版本 |
-|------|------|------|
-| Caddy（自建） | `caddy-l4-trojan:latest` | 基于 `caddy:2.11.4` + `caddy-l4` + `caddy-trojan` |
-| Xray | `ghcr.io/xtls/xray-core` | `1.8.24` |
+| Component | Image | Version |
+|-----------|-------|---------|
+| Caddy (self-built) | `caddy-l4-trojan:latest` | Based on `caddy:2.11.4` + `caddy-l4` + `caddy-trojan` |
+| Xray | `ghcr.io/xtls/xray-core` | `26.6.27` |
 | Hysteria2 | `tobyxdd/hysteria` | `v2.10.0` |
-| 渲染/工具 | `alpine` | `3.20` |
+| Render/tools | `alpine` | `3.20` |
 
-> 版本均已锁定，确保可稳定复现（历史上 Xray 版本漂移导致过握手不兼容）。
+> All versions are pinned to ensure reproducibility (historically, Xray version drift caused handshake incompatibilities).

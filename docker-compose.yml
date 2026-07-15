@@ -45,7 +45,7 @@ services:
 
   # Xray：VLESS + XTLS-Vision + REALITY，仅内网监听 5443（由 Caddy layer4 分流转入）
   xray:
-    image: ghcr.io/xtls/xray-core:1.8.24
+    image: ghcr.io/xtls/xray-core:26.6.27
     container_name: x-xray
     restart: unless-stopped
     command: ["run", "-c", "/etc/xray/config.json"]

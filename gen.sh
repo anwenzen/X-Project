@@ -19,7 +19,7 @@ cd "$(dirname "$0")"
 
 ENV_FILE=".env"
 EXAMPLE_FILE=".env.example"
-XRAY_IMAGE="ghcr.io/xtls/xray-core:1.8.24"
+XRAY_IMAGE="ghcr.io/xtls/xray-core:26.6.27"
 
 # ----- 准备 .env -----
 if [ ! -f "$ENV_FILE" ]; then
