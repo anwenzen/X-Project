@@ -4,11 +4,12 @@
 #
 #  生成内容：
 #    - VLESS UUID
-#    - REALITY x25519 密钥对（私钥/公钥）
+#    - REALITY 密钥对（私钥/公钥）
 #    - REALITY shortId
+#    - Trojan 密码
 #    - Hysteria2 认证密码 & 混淆密码
 #
-#  依赖：docker（用一次性容器调用 xray 生成密钥，无需本机安装 xray）
+#  依赖：docker（用一次性容器调用 sing-box 生成密钥，无需本机安装 sing-box）
 #  用法：
 #    ./gen.sh            # 首次：从 .env.example 生成 .env 并填入随机密钥
 #    ./gen.sh --force    # 覆盖已有 .env 中的密钥字段
@@ -19,7 +20,7 @@ cd "$(dirname "$0")"
 
 ENV_FILE=".env"
 EXAMPLE_FILE=".env.example"
-XRAY_IMAGE="ghcr.io/xtls/xray-core:26.6.27"
+SINGBOX_IMAGE="ghcr.io/sagernet/sing-box:v1.13.14"
 
 # ----- 准备 .env -----
 if [ ! -f "$ENV_FILE" ]; then
@@ -29,14 +30,14 @@ fi
 
 # ----- 生成 UUID -----
 echo "[gen] 生成 VLESS UUID..."
-VLESS_UUID=$(docker run --rm "$XRAY_IMAGE" uuid)
+VLESS_UUID=$(docker run --rm "$SINGBOX_IMAGE" generate uuid)
 
-# ----- 生成 REALITY x25519 密钥对 -----
-echo "[gen] 生成 REALITY x25519 密钥对..."
-X25519_OUT=$(docker run --rm "$XRAY_IMAGE" x25519)
-# 兼容不同版本输出格式（Private key: / PrivateKey: 等）
-REALITY_PRIVATE_KEY=$(echo "$X25519_OUT" | grep -iE "private" | awk -F: '{print $2}' | tr -d ' ')
-REALITY_PUBLIC_KEY=$(echo "$X25519_OUT"  | grep -iE "public"  | awk -F: '{print $2}' | tr -d ' ')
+# ----- 生成 REALITY 密钥对 -----
+echo "[gen] 生成 REALITY 密钥对..."
+REALITY_OUT=$(docker run --rm "$SINGBOX_IMAGE" generate reality-keypair)
+# 兼容不同版本输出格式（PrivateKey: / Private key: 等）
+REALITY_PRIVATE_KEY=$(echo "$REALITY_OUT" | grep -iE "private" | awk -F: '{print $2}' | tr -d ' ')
+REALITY_PUBLIC_KEY=$(echo "$REALITY_OUT"  | grep -iE "public"  | awk -F: '{print $2}' | tr -d ' ')
 
 # ----- 生成 shortId（8 字节 = 16 位十六进制）-----
 REALITY_SHORT_ID=$(openssl rand -hex 8)

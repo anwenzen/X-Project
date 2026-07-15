@@ -1,0 +1,89 @@
+{
+  "log": {
+    "level": "warn",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "vless",
+      "tag": "vless-reality",
+      "listen": "0.0.0.0",
+      "listen_port": 5443,
+      "users": [
+        {
+          "name": "reality",
+          "uuid": "${VLESS_UUID}",
+          "flow": "xtls-rprx-vision"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "${DOMAIN}",
+        "reality": {
+          "enabled": true,
+          "handshake": {
+            "server": "x-caddy",
+            "server_port": 4443
+          },
+          "private_key": "${REALITY_PRIVATE_KEY}",
+          "short_id": ["${REALITY_SHORT_ID}"]
+        }
+      }
+    },
+    {
+      "type": "trojan",
+      "tag": "trojan-in",
+      "listen": "0.0.0.0",
+      "listen_port": 8443,
+      "users": [
+        {
+          "name": "trojan",
+          "password": "${TROJAN_PASSWORD}"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "${SITE_DOMAIN}",
+        "alpn": ["http/1.1"],
+        "certificate_path": "/caddy-certs/certificates/acme-v02.api.letsencrypt.org-directory/${SITE_DOMAIN}/${SITE_DOMAIN}.crt",
+        "key_path": "/caddy-certs/certificates/acme-v02.api.letsencrypt.org-directory/${SITE_DOMAIN}/${SITE_DOMAIN}.key"
+      },
+      "fallback": {
+        "server": "x-caddy",
+        "server_port": 8080
+      }
+    },
+    {
+      "type": "hysteria2",
+      "tag": "hy2-in",
+      "listen": "::",
+      "listen_port": 443,
+      "up_mbps": ${HYSTERIA_UP_MBPS},
+      "down_mbps": ${HYSTERIA_DOWN_MBPS},
+      "users": [
+        {
+          "name": "hysteria2",
+          "password": "${HYSTERIA_PASSWORD}"
+        }
+      ],
+      "obfs": {
+        "type": "salamander",
+        "password": "${HYSTERIA_OBFS_PASSWORD}"
+      },
+      "masquerade": "${MASQUERADE_UPSTREAM}",
+      "tls": {
+        "enabled": true,
+        "server_name": "${DOMAIN}",
+        "alpn": ["h3"],
+        "certificate_path": "/caddy-certs/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}/${DOMAIN}.crt",
+        "key_path": "/caddy-certs/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}/${DOMAIN}.key"
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ]
+}

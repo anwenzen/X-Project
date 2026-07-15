@@ -1,15 +1,17 @@
 # ============================================================================
-#  X-Project  —  443 共用架构（Caddy layer4 SNI 分流）
+#  X-Project  —  443 共用架构（Caddy layer4 SNI 分流 + sing-box 承载协议）
 #
 #  TCP 443 → x-caddy(layer4) 按 SNI 分流：
-#     SNI = ${DOMAIN}      → x-xray:5443 (VLESS + XTLS-Vision + REALITY)
-#     其它 SNI            → 127.0.0.1:4443 (Caddy 本地: Trojan + ${SITE_DOMAIN} 文件站)
-#  UDP 443 → x-hysteria (Hysteria2，独占，直接读取 Caddy 申请的 ${DOMAIN} 证书)
-#  证书由 Caddy 统一签发/续期，Hysteria2 只读挂载证书目录并自动热重载。
+#     SNI = ${DOMAIN}      → x-singbox:5443 (VLESS + XTLS-Vision + REALITY)
+#     SNI = ${SITE_DOMAIN} → x-singbox:8443 (Trojan over TLS)
+#     其它 SNI            → 127.0.0.1:4443 (Caddy 本地 TLS 伪装站)
+#  UDP 443 → x-singbox (Hysteria2，独占，直接读取 Caddy 申请的 ${DOMAIN} 证书)
+#  证书由 Caddy 统一签发/续期，sing-box 只读挂载证书目录；证书文件更新后
+#  sing-box 的 certificate_path/key_path 会自动热重载，无需重启。
 # ============================================================================
 
 services:
-  # 一次性渲染 xray / hysteria / caddy 配置
+  # 一次性渲染 sing-box / caddy 配置
   config-init:
     image: alpine:3.20
     container_name: x-config-init
@@ -17,17 +19,15 @@ services:
     entrypoint: ["/bin/sh", "/render.sh"]
     volumes:
       - ./scripts/render-config.sh:/render.sh:ro
-      - ./config/xray/config.json.template:/tpl/xray.json:ro
-      - ./config/hysteria/config.yaml.template:/tpl/hysteria.yaml:ro
+      - ./config/singbox/config.json.template:/tpl/singbox.json:ro
       - ./config/caddy/caddy.json.template:/tpl/caddy.json:ro
-      - ./data/xray:/out/xray
-      - ./data/hysteria:/out/hysteria
+      - ./data/singbox:/out/singbox
       - ./data/caddy:/out/caddy
     restart: "no"
 
-  # Caddy(layer4+trojan)：TCP 443 SNI 分流 + 本地 web/trojan + 证书自动申请/续期
+  # Caddy(layer4)：TCP 443 SNI 分流 + 本地 web 伪装站 + 证书自动申请/续期
   caddy:
-    image: caddy-l4-trojan:latest
+    image: caddy-l4:latest
     container_name: x-caddy
     restart: unless-stopped
     command: ["caddy", "run", "--config", "/data/caddy/caddy.json"]
@@ -36,44 +36,29 @@ services:
       - "443:443"      # layer4 SNI 分流入口
     volumes:
       - ./data/caddy:/data/caddy       # 渲染后的 caddy.json + 证书存储（持久化）
-      - ./config/site:/srv:ro          # 伪装站（${SITE_DOMAIN}）文件根目录
+      - ./config/site:/srv:ro          # 伪装站文件根目录
     networks:
       - xnet
     depends_on:
       config-init:
         condition: service_completed_successfully
 
-  # Xray：VLESS + XTLS-Vision + REALITY，仅内网监听 5443（由 Caddy layer4 分流转入）
-  xray:
-    image: ghcr.io/xtls/xray-core:26.6.27
-    container_name: x-xray
+  # sing-box：一并承载 VLESS-REALITY(5443) + Trojan(8443) + Hysteria2(UDP 443)
+  #   5443/8443 仅内网监听，由 Caddy layer4 按 SNI 分流转入；
+  #   UDP 443 独占对外；只读挂载 Caddy 证书目录，证书更新后自动热重载。
+  singbox:
+    image: ghcr.io/sagernet/sing-box:v1.13.14
+    container_name: x-singbox
     restart: unless-stopped
-    command: ["run", "-c", "/etc/xray/config.json"]
+    command: ["run", "-c", "/etc/sing-box/config.json"]
     dns:
       - 8.8.8.8
       - 1.1.1.1
-    volumes:
-      - ./data/xray:/etc/xray
-    networks:
-      - xnet
-    depends_on:
-      config-init:
-        condition: service_completed_successfully
-
-  # Hysteria2：独占 UDP 443，直接只读挂载 Caddy 证书目录（无需 cert-sync 中转）
-  #   Caddy 续期后原地更新证书文件，Hysteria2 会自动热重载，无需重启。
-  #   注：证书由 Caddy 异步申请，首次全新部署时若证书尚未就绪，Hysteria2 会
-  #       因读不到证书而退出并按 restart 策略重试，待证书就绪后自动稳定运行。
-  hysteria:
-    image: tobyxdd/hysteria:v2.10.0
-    container_name: x-hysteria
-    restart: unless-stopped
-    command: ["server", "-c", "/etc/hysteria/config.yaml"]
     ports:
       - "443:443/udp"
     volumes:
-      - ./data/hysteria:/etc/hysteria
-      - ./data/caddy:/caddy-certs:ro   # 只读挂载 Caddy 证书目录，Hysteria2 直接读取
+      - ./data/singbox:/etc/sing-box
+      - ./data/caddy:/caddy-certs:ro   # 只读挂载 Caddy 证书目录，sing-box 直接读取
     networks:
       - xnet
     depends_on:
