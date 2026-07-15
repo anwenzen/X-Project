@@ -2,14 +2,6 @@
 
 Deploy three proxy protocols with Docker Compose. Using **Caddy layer4 (L4) SNI routing**, **VLESS-REALITY, Trojan, and the decoy website share a single TCP 443**, while **Hysteria2 owns UDP 443**. Every protocol runs on the standard 443 port; an active probe only ever sees a real website with a real certificate — **strong stealth, better censorship resistance**.
 
-| Protocol | Core | Entry | Domain (SNI) | Certificate | Use case |
-|----------|------|-------|--------------|-------------|----------|
-| **VLESS + XTLS-Vision + REALITY** | Xray 26.6.27 | **TCP 443** (Caddy routing) | `DOMAIN` | Borrows your own domain's real cert for camouflage | Daily driver, censorship resistance |
-| **Trojan** | Caddy (caddy-trojan) | **TCP 443** (Caddy routing) | `SITE_DOMAIN` | Auto-issued by Caddy | Backup channel |
-| **Hysteria2** | hysteria v2.10.0 | **UDP 443** | `DOMAIN` | Reuses Caddy's cert (hot reload) | Peak hours, weak networks, streaming |
-
-> TCP 443 and UDP 443 share the same port number but different protocols, so they don't conflict. On TCP 443, Caddy further routes by SNI to REALITY / Trojan / website.
-
 ---
 
 ## Table of Contents
@@ -20,10 +12,7 @@ Deploy three proxy protocols with Docker Compose. Using **Caddy layer4 (L4) SNI 
 - [4. Deployment Steps](#4-deployment-steps)
 - [5. .env Reference](#5-env-reference)
 - [6. Client Connection Parameters](#6-client-connection-parameters)
-- [7. How It Works](#7-how-it-works)
-- [8. Common Ops Commands](#8-common-ops-commands)
-- [9. Troubleshooting (Lessons Learned)](#9-troubleshooting-lessons-learned)
-- [10. Migrating to a New Machine](#10-migrating-to-a-new-machine)
+- [7. Migrating to a New Machine](#7-migrating-to-a-new-machine)
 
 ---
 
@@ -93,7 +82,6 @@ X-Project/
 ## 3. Prerequisites
 
 1. A Linux server with a public IP, with **Docker** and the **Docker Compose plugin** installed.
-   - RAM ≥ 1G recommended; **compiling Caddy is memory-hungry, so on low-memory machines add 2G of swap first** (see Troubleshooting).
 2. **Two domains** (must be different), both with A records pointing to the server's public IP:
 
    | Variable | Purpose | Example |
@@ -177,44 +165,6 @@ curl -sI https://<SITE_DOMAIN> | head -1
 
 After deploying, run `cat .env` to get the secrets. Replace `<...>` below with your actual values.
 
-### 1. VLESS-REALITY (TCP 443)
-
-| Field | Value |
-|-------|-------|
-| Address | Server IP or `DOMAIN` |
-| Port | `443` |
-| Protocol | VLESS |
-| UUID | `<VLESS_UUID>` |
-| Flow | `xtls-rprx-vision` |
-| Transport | TCP |
-| Security | reality |
-| SNI / peer | **`<DOMAIN>`** |
-| Fingerprint | `chrome` |
-| PublicKey (pbk) | `<REALITY_PUBLIC_KEY>` |
-| ShortId (sid) | `<REALITY_SHORT_ID>` |
-
-### 2. Trojan (TCP 443)
-
-| Field | Value |
-|-------|-------|
-| Address | **`<SITE_DOMAIN>`** (uses TLS, must be a domain) |
-| Port | `443` |
-| Protocol | Trojan |
-| Password | `<TROJAN_PASSWORD>` |
-| SNI | `<SITE_DOMAIN>` |
-
-### 3. Hysteria2 (UDP 443)
-
-| Field | Value |
-|-------|-------|
-| Address | **`<DOMAIN>`** (cert validation requires a domain, not an IP) |
-| Port | `443` (UDP) |
-| Password | `<HYSTERIA_PASSWORD>` |
-| obfs | `salamander` |
-| obfs password | `<HYSTERIA_OBFS_PASSWORD>` |
-| SNI | `<DOMAIN>` |
-| Up/Down bandwidth | **Leave empty** (let BBR self-adapt; never set too high) |
-
 ### Clash Verge Rev Example
 
 ```yaml
@@ -255,81 +205,7 @@ proxies:
 
 ---
 
-## 7. How It Works
-
-### 7.1 SNI routing on TCP 443
-
-Caddy uses the `caddy-l4` plugin to do L4 proxying on 443, reading only the ClientHello SNI without decryption:
-
-| ClientHello SNI | Forwarded to | Subsequent handling |
-|-----------------|--------------|---------------------|
-| `DOMAIN` | `x-xray:5443` | Xray handles the VLESS-REALITY handshake |
-| Others (incl. `SITE_DOMAIN`) | `127.0.0.1:4443` | Caddy's local HTTP service (with trojan wrapper) |
-
-Once at local 4443, Caddy splits further by HTTP Host:
-- `Host = SITE_DOMAIN`: first pass through Trojan (`caddy-trojan`, decodes Trojan-over-TLS); non-Trojan traffic falls to the file site `/srv`
-- `Host = DOMAIN`: file site `/srv` (this is exactly the real website a prober sees during **REALITY fallback**)
-
-### 7.2 REALITY "borrowing" and fallback
-
-- A REALITY client handshakes with the correct `pbk`/`sid`/UUID → Xray authenticates and proxies.
-- An unauthenticated **active probe** (e.g. a browser hitting `https://DOMAIN` directly) → Xray falls the connection back to `REALITY_DEST=x-caddy:4443`, and Caddy responds with `DOMAIN`'s real cert + real website. The prober sees a normally operating website and cannot tell this is a proxy entry point.
-
-### 7.3 Certificate lifecycle
-
-1. Caddy issues certs for `DOMAIN` and `SITE_DOMAIN` via ACME (Let's Encrypt), stored under `./data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/<domain>/`.
-2. Hysteria2 read-only mounts `./data/caddy` → container `/caddy-certs`, and its config points directly to `DOMAIN`'s `.crt`/`.key`.
-3. Caddy auto-renews → updates the cert files in place → Hysteria2 **hot-reloads automatically**, no manual intervention.
-
-> ⚠️ The cert path hard-codes the ACME CA directory name `acme-v02.api.letsencrypt.org-directory` (Let's Encrypt). `caddy.json.template` is locked to LE only, so the path is stable. If you switch to another CA, also update the path in `config/hysteria/config.yaml.template`.
-
----
-
-## 8. Common Ops Commands
-
-```bash
-cd X-Project
-
-docker compose ps                       # Service status
-docker compose logs -f caddy            # Caddy routing / cert logs
-docker compose logs -f xray             # Xray logs (from 26.6.27, goes to stdout; no longer writes data/xray/*.log)
-docker logs x-hysteria --tail 30        # Hysteria2 logs
-docker compose restart hysteria         # Restart a single service
-docker compose down                     # Stop (certs/configs kept in ./data)
-docker compose up -d                    # Start
-
-# After editing .env: config-init uses env_file, so you must recreate to re-render/re-inject (restart won't do it)
-docker compose up -d --force-recreate --no-deps config-init
-docker compose up -d --force-recreate --no-deps xray hysteria caddy
-
-# Enable Xray debug to capture connections (remember to switch back to warning and restart x-xray afterward)
-sed -i 's/"loglevel": "warning"/"loglevel": "debug"/' data/xray/config.json && docker restart x-xray
-```
-
----
-
-## 9. Troubleshooting (Lessons Learned)
-
-Organized from pitfalls actually hit on this project — check here first when something breaks:
-
-1. **Xray version**: currently pinned to `26.6.27`. Testing showed `26.7.11` handshakes unreliably with some clients' built-in REALITY implementations (e.g. Shadowrocket); `24.x / 25.x / 26.6.27` and earlier are all fine. **Always validate on a test port before upgrading, and don't just switch to `latest`** (a bisection confirmed `26.6.27` is the latest stably usable version).
-2. **Don't use an Akamai CDN site as the REALITY dest** (e.g. `www.microsoft.com`): it causes the server to flag all clients as `invalid connection`. This project uses its own domain for fallback, avoiding the issue.
-3. **Hysteria2 client bandwidth must be empty / set small**: setting it too high triggers the Brutal congestion control's "hard send", which instantly saturates the link and causes heavy packet loss on mobile networks — the symptom is "**connects but can't transfer**" (log `accepting stream failed: timeout`). Leaving it empty (BBR) is the most stable.
-4. **VLESS won't connect, server log `server name mismatch`**: the client SNI is wrong (not `DOMAIN`), or a stale node lingers on the phone. Confirm client SNI/peer = `DOMAIN` and delete old nodes.
-5. **VLESS won't connect, server log `authentication failed`**: `pbk`/`sid` don't match the server, or the client-server clock skew is too large (REALITY has timestamp validation). Double-check the keys and enable "set time automatically" on the phone.
-6. **`.env` changes not taking effect**: `config-init` uses `env_file`; `docker restart` won't re-inject/re-render — you must `docker compose up -d --force-recreate` to recreate the relevant containers.
-7. **Phone can't connect over UDP 443**: first check whether the **cloud security group** allows UDP 443 (a local `ufw`/`iptables` allow doesn't mean the cloud console allows it).
-8. **Other containers OOM-killed while compiling Caddy** (low-memory machines): add swap:
-   ```bash
-   fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
-   echo '/swapfile none swap sw 0 0' >> /etc/fstab
-   ```
-9. **Hysteria2 restarts repeatedly on first deploy**: the cert isn't issued yet — this is normal; it stabilizes once Caddy obtains the cert.
-10. **Newer Xray images (from 24.x) run as the non-root user `65532`**: if the config specifies `access`/`error` log file paths (e.g. `/etc/xray/access.log`), the container restarts repeatedly because it can't write to `/etc/xray/` (log `open /etc/xray/access.log: permission denied`). This project's template has been changed to **not write log files — logs go to stdout** (view with `docker logs x-xray`), so `data/xray` can stay root-owned and needs no special chown. **Do not** add `access`/`error` file paths back into the config.
-
----
-
-## 10. Migrating to a New Machine
+## 7. Migrating to a New Machine
 
 1. On the new machine, `git clone git@github.com:anwenzen/X-Project.git` (the repo does not include `.env`).
 2. Follow "[4. Deployment Steps](#4-deployment-steps)" to build the image, run `./gen.sh`, and fill in `.env` (or copy `.env` from the old machine to keep the same UUID/keys).
